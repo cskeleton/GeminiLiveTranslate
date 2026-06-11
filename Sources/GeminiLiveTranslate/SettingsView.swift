@@ -8,7 +8,7 @@ struct SettingsView: View {
     @State private var isToggling = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 0) {
             // Header
             HStack {
                 Image(systemName: "globe")
@@ -19,9 +19,8 @@ struct SettingsView: View {
                     .fontWeight(.semibold)
                 Spacer()
             }
-            .padding(.bottom, 4)
 
-            Divider()
+            Divider().padding(.vertical, 12)
 
             // API Key
             VStack(alignment: .leading, spacing: 4) {
@@ -38,9 +37,8 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Get your API Key")
                                 .font(.headline)
-                            Text("1. Go to [Google AI Studio](https://aistudio.google.com/apikey)")
-                            Text("2. Click \"Create API Key\"")
-                            Text("3. Copy and paste the key here")
+                            Text("1. Go to Google AI Studio\n2. Click \"Create API Key\"\n3. Copy and paste the key here")
+                                .fixedSize(horizontal: false, vertical: true)
                             Text("The key is stored locally in UserDefaults.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -54,6 +52,7 @@ struct SettingsView: View {
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.body, design: .monospaced))
             }
+            .padding(.vertical, 8)
 
             // Target Language
             VStack(alignment: .leading, spacing: 4) {
@@ -65,39 +64,60 @@ struct SettingsView: View {
                     }
                 }
                 .labelsHidden()
+                .onChange(of: appState.targetLanguageCode) { _, _ in
+                    restartTranslationIfNeeded()
+                }
             }
+            .padding(.vertical, 8)
 
-            Divider()
+            Divider().padding(.vertical, 4)
 
             // Options
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 12) {
                 Text("Options")
                     .font(.headline)
 
-                Toggle("Show subtitle overlay on screen", isOn: $appState.showOverlay)
-                Toggle("Write subtitles to file (~/Downloads)", isOn: $appState.writeToFile)
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Show subtitle overlay on screen", isOn: $appState.showOverlay)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Toggle("Write subtitles to file (~/Downloads)", isOn: $appState.writeToFile)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
-                HStack {
-                    Text("Subtitle font size")
+                Divider()
+
+                // Subtitle font size — full row
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Subtitle font size")
+                        Spacer()
+                        Text("\(Int(appState.subtitleFontSize))pt")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
                     Slider(value: $appState.subtitleFontSize, in: 14...36, step: 1)
-                    Text("\(Int(appState.subtitleFontSize))pt")
-                        .monospacedDigit()
-                        .frame(width: 36)
                 }
 
-                HStack {
-                    Text("Captured audio playback volume")
+                // Captured audio playback volume — full row
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Captured audio playback volume")
+                        Spacer()
+                        Text("\(Int(appState.originalAudioVolume * 100))%")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
                     Slider(value: $appState.originalAudioVolume, in: 0...1, step: 0.05)
-                    Text("\(Int(appState.originalAudioVolume * 100))%")
-                        .monospacedDigit()
-                        .frame(width: 36)
                 }
+
                 Text("Source language is auto-detected by Gemini. If detection fails, try increasing your player volume.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(.vertical, 8)
 
-            Divider()
+            Divider().padding(.vertical, 4)
 
             // Status & Controls
             VStack(spacing: 8) {
@@ -125,10 +145,10 @@ struct SettingsView: View {
                                 Text("Original:")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                    .frame(width: 68, alignment: .trailing)
+                                    .fixedSize(horizontal: true, vertical: false)
                                 Text(appState.lastInputText)
                                     .font(.caption)
-                                    .lineLimit(2)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                         if !appState.lastOutputText.isEmpty {
@@ -136,11 +156,11 @@ struct SettingsView: View {
                                 Text("Translated:")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                    .frame(width: 68, alignment: .trailing)
+                                    .fixedSize(horizontal: true, vertical: false)
                                 Text(appState.lastOutputText)
                                     .font(.caption)
-                                    .foregroundColor(.yellow)
-                                    .lineLimit(2)
+                                    .foregroundColor(.cyan)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
@@ -154,7 +174,7 @@ struct SettingsView: View {
                     Text(error)
                         .font(.caption)
                         .foregroundColor(.red)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 // Start/Stop button
@@ -177,11 +197,36 @@ struct SettingsView: View {
                 .disabled(appState.geminiAPIKey.isEmpty || isToggling)
                 .keyboardShortcut(.return, modifiers: .command)
             }
+            .padding(.vertical, 8)
         }
         .padding(20)
-        .frame(width: 400)
-        .onDisappear {
-            // Don't stop translation when settings close
+        .frame(width: 420)
+    }
+
+    private func restartTranslationIfNeeded() {
+        guard appState.isTranslating, !isToggling else { return }
+
+        Task {
+            isToggling = true
+            await translationEngine?.stop()
+            translationEngine = nil
+
+            let engine = TranslationEngine(
+                apiKey: appState.geminiAPIKey,
+                targetLanguageCode: appState.targetLanguageCode,
+                showOverlay: appState.showOverlay,
+                writeToFile: appState.writeToFile,
+                subtitleFontSize: appState.subtitleFontSize
+            )
+            translationEngine = engine
+
+            do {
+                try await engine.start()
+            } catch {
+                appState.errorMessage = error.localizedDescription
+                appState.statusMessage = "Error"
+            }
+            isToggling = false
         }
     }
 
