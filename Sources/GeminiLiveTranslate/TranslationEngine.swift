@@ -52,13 +52,22 @@ class TranslationEngine {
             let socket = GeminiWebSocket(apiKey: apiKey, targetLanguageCode: targetLanguageCode)
 
             socket.onInputTranscription = { [weak self] text, langCode in
+                // Delay subtitle to match audio playback (AudioQueue buffer depth)
+                let delay = player.bufferLatency
                 Task { @MainActor [weak self] in
+                    if delay > 0.05 {
+                        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    }
                     self?.handleInputTranscription(text, langCode: langCode)
                 }
             }
 
             socket.onOutputTranscription = { [weak self] text, langCode in
+                let delay = player.bufferLatency
                 Task { @MainActor [weak self] in
+                    if delay > 0.05 {
+                        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    }
                     self?.handleOutputTranscription(text, langCode: langCode)
                 }
             }
