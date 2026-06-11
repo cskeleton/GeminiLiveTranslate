@@ -19,6 +19,7 @@ class TranslationEngine {
     private var subtitleFileURL: URL?
 
     private(set) var isRunning = false
+    private var isTransitioning = false  // Prevents concurrent start/stop
 
     init(apiKey: String, targetLanguageCode: String, showOverlay: Bool,
          writeToFile: Bool, subtitleFontSize: Double) {
@@ -31,88 +32,111 @@ class TranslationEngine {
 
     /// Start the translation pipeline
     func start() async throws {
-        guard !isRunning else { return }
+        guard !isRunning, !isTransitioning else { return }
+        isTransitioning = true
 
-        // 1. Set up subtitle file if enabled
-        if writeToFile {
-            setupSubtitleFile()
-        }
-
-        // 2. Create audio player first (before callbacks reference it)
-        let player = AudioPlayer()
-        try player.start()
-        audioPlayer = player
-
-        // 3. Connect to Gemini API
-        let socket = GeminiWebSocket(apiKey: apiKey, targetLanguageCode: targetLanguageCode)
-
-        socket.onInputTranscription = { [weak self] text, langCode in
-            Task { @MainActor [weak self] in
-                self?.handleInputTranscription(text, langCode: langCode)
+        do {
+            // 1. Set up subtitle file if enabled
+            if writeToFile {
+                setupSubtitleFile()
             }
-        }
 
-        socket.onOutputTranscription = { [weak self] text, langCode in
-            Task { @MainActor [weak self] in
-                self?.handleOutputTranscription(text, langCode: langCode)
+            // 2. Create audio player first (before callbacks reference it)
+            let player = AudioPlayer()
+            try player.start()
+            audioPlayer = player
+
+            // 3. Connect to Gemini API
+            let socket = GeminiWebSocket(apiKey: apiKey, targetLanguageCode: targetLanguageCode)
+
+            socket.onInputTranscription = { [weak self] text, langCode in
+                Task { @MainActor [weak self] in
+                    self?.handleInputTranscription(text, langCode: langCode)
+                }
             }
-        }
 
-        // Audio playback is thread-safe (AudioQueue uses its own thread)
-        // Capture player directly — don't go through @MainActor self
-        socket.onAudioData = { audioData in
-            player.enqueueAudio(audioData)
-        }
-
-        socket.onError = { [weak self] error in
-            Task { @MainActor [weak self] in
-                player.stop()
-                AppState.shared.errorMessage = error.localizedDescription
-                AppState.shared.statusMessage = "Error"
+            socket.onOutputTranscription = { [weak self] text, langCode in
+                Task { @MainActor [weak self] in
+                    self?.handleOutputTranscription(text, langCode: langCode)
+                }
             }
-        }
 
-        geminiSocket = socket
-        try await socket.connect()
-
-        // 3. Start audio capture
-        let capture = SystemAudioCapture()
-        capture.onAudioChunk = { [weak self] pcmData in
-            Task { @MainActor in
-                self?.geminiSocket?.sendAudioChunk(pcmData)
+            // Audio playback is thread-safe (AudioQueue uses its own thread)
+            // Capture player directly — don't go through @MainActor self
+            socket.onAudioData = { audioData in
+                player.enqueueAudio(audioData)
             }
-        }
-        capture.onError = { [weak self] error in
-            Task { @MainActor in
-                AppState.shared.errorMessage = "Audio capture error: \(error.localizedDescription)"
-                await self?.stop()
+
+            socket.onError = { [weak self] error in
+                Task { @MainActor [weak self] in
+                    player.stop()
+                    AppState.shared.errorMessage = error.localizedDescription
+                    AppState.shared.statusMessage = "Error"
+                    await self?.forceStop()
+                }
             }
+
+            geminiSocket = socket
+            try await socket.connect()
+
+            // 4. Start audio capture
+            let capture = SystemAudioCapture()
+            capture.onAudioChunk = { [weak self] pcmData in
+                Task { @MainActor in
+                    self?.geminiSocket?.sendAudioChunk(pcmData)
+                }
+            }
+            capture.onError = { [weak self] error in
+                Task { @MainActor in
+                    AppState.shared.errorMessage = "Audio capture error: \(error.localizedDescription)"
+                    await self?.forceStop()
+                }
+            }
+            try await capture.startCapture()
+            audioCapture = capture
+
+            isRunning = true
+            isTransitioning = false
+
+            AppState.shared.isTranslating = true
+            AppState.shared.statusMessage = "Translating…"
+            NotificationCenter.default.post(name: .translationStarted, object: nil)
+
+        } catch {
+            isTransitioning = false
+            // Clean up anything that was partially started
+            await forceStop()
+            throw error
         }
-        try await capture.startCapture()
-        audioCapture = capture
-
-        isRunning = true
-
-        AppState.shared.isTranslating = true
-        AppState.shared.statusMessage = "Translating…"
-        NotificationCenter.default.post(name: .translationStarted, object: nil)
     }
 
     /// Stop the translation pipeline
     func stop() async {
-        guard isRunning else { return }
+        guard isRunning, !isTransitioning else { return }
+        isTransitioning = true
+
+        await forceStop()
+    }
+
+    /// Force stop regardless of state (used for error recovery)
+    private func forceStop() async {
         isRunning = false
 
-        await audioCapture?.stopCapture()
-        audioCapture = nil
-
+        // Disconnect socket first (stops audio data flow)
         geminiSocket?.disconnect()
         geminiSocket = nil
 
+        // Stop audio capture
+        await audioCapture?.stopCapture()
+        audioCapture = nil
+
+        // Stop playback last (finish playing buffered audio)
         audioPlayer?.stop()
         audioPlayer = nil
 
         closeSubtitleFile()
+
+        isTransitioning = false
 
         AppState.shared.isTranslating = false
         AppState.shared.statusMessage = "Ready"

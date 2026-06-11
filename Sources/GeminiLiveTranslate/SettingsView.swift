@@ -5,6 +5,7 @@ struct SettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var translationEngine: TranslationEngine?
     @State private var showingAPIKeyHelp = false
+    @State private var isToggling = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -159,15 +160,21 @@ struct SettingsView: View {
                 // Start/Stop button
                 Button(action: toggleTranslation) {
                     HStack {
-                        Image(systemName: appState.isTranslating ? "stop.circle.fill" : "play.circle.fill")
-                        Text(appState.isTranslating ? "Stop Translation" : "Start Translation")
+                        if isToggling {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text(appState.isTranslating ? "Stopping…" : "Starting…")
+                        } else {
+                            Image(systemName: appState.isTranslating ? "stop.circle.fill" : "play.circle.fill")
+                            Text(appState.isTranslating ? "Stop Translation" : "Start Translation")
+                        }
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(appState.isTranslating ? .red : .blue)
-                .disabled(appState.geminiAPIKey.isEmpty)
+                .tint(isToggling ? .gray : (appState.isTranslating ? .red : .blue))
+                .disabled(appState.geminiAPIKey.isEmpty || isToggling)
                 .keyboardShortcut(.return, modifiers: .command)
             }
         }
@@ -179,10 +186,14 @@ struct SettingsView: View {
     }
 
     private func toggleTranslation() {
+        guard !isToggling else { return }
+        isToggling = true
+
         if appState.isTranslating {
             Task {
                 await translationEngine?.stop()
                 translationEngine = nil
+                isToggling = false
             }
         } else {
             Task {
@@ -201,6 +212,7 @@ struct SettingsView: View {
                     appState.errorMessage = error.localizedDescription
                     appState.statusMessage = "Error"
                 }
+                isToggling = false
             }
         }
     }
