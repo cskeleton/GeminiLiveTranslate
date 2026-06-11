@@ -22,6 +22,7 @@ class TranslationEngine {
 
     private(set) var isRunning = false
     private var isTransitioning = false  // Prevents concurrent start/stop
+    private var isPaused = false  // Video paused — skip latency updates
 
     init(apiKey: String, targetLanguageCode: String, showOverlay: Bool,
          writeToFile: Bool, subtitleFontSize: Double) {
@@ -76,6 +77,8 @@ class TranslationEngine {
             // Capture player directly — don't go through @MainActor self
             socket.onAudioData = { [weak self] audioData in
                 player.enqueueAudio(audioData)
+                // Skip latency updates when video is paused
+                guard self?.isPaused != true else { return }
                 let networkLatency = self?.latencyTracker?.recordReceive() ?? 0
                 let bufferLatency = player.bufferLatency
                 let totalLatency = self?.latencyTracker?.currentLatency(extra: bufferLatency) ?? networkLatency
@@ -123,16 +126,19 @@ class TranslationEngine {
                 let server = WebSocketServer(port: UInt16(AppState.shared.iinaSyncPort))
                 do {
                     // Handle flush signals from IINA plugin (seek/file-change)
-                    server.onFlush = {
+                    server.onFlush = { [weak self] in
+                        self?.isPaused = false
                         player.flush()
                         tracker.resetForRecalibration()
                     }
                     // Handle pause — freeze AudioQueue in place
-                    server.onPause = {
+                    server.onPause = { [weak self] in
+                        self?.isPaused = true
                         player.pause()
                     }
                     // Handle resume — unfreeze AudioQueue, recalibrate latency
-                    server.onResume = {
+                    server.onResume = { [weak self] in
+                        self?.isPaused = false
                         player.resume()
                         tracker.resetForRecalibration()
                     }
