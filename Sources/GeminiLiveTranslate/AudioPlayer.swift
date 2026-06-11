@@ -13,6 +13,7 @@ final class AudioPlayer: @unchecked Sendable {
     private var buffers: [AudioQueueBufferRef] = []
 
     private var chunkCount = 0
+    private var isPaused = false
 
     /// Number of buffers currently filled and queued for playback (0...bufferCount).
     var filledBufferCount: Int {
@@ -90,15 +91,31 @@ final class AudioPlayer: @unchecked Sendable {
         buffers.removeAll()
     }
 
-    /// Flush all buffered audio (used on pause/seek to prevent desync)
+    /// Pause playback — freezes the AudioQueue in place, buffers preserved.
+    /// Incoming audio during pause is dropped.
+    func pause() {
+        guard isPlaying, !isPaused, let queue = audioQueue else { return }
+        isPaused = true
+        AudioQueuePause(queue)
+        print("[AudioPlayer] Paused")
+    }
+
+    /// Resume playback from where it was paused.
+    func resume() {
+        guard isPlaying, isPaused, let queue = audioQueue else { return }
+        isPaused = false
+        AudioQueueStart(queue, nil)
+        print("[AudioPlayer] Resumed")
+    }
+
+    /// Flush all buffered audio (used on seek/file-change to discard stale data)
     func flush() {
         guard isPlaying, let queue = audioQueue else { return }
-        // Stop the queue, reset all buffers, restart
+        isPaused = false
         AudioQueueStop(queue, true)
         for buffer in buffers {
             buffer.pointee.mAudioDataByteSize = 0
         }
-        // Re-prime and restart
         for buffer in buffers {
             AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
         }
@@ -106,9 +123,9 @@ final class AudioPlayer: @unchecked Sendable {
         print("[AudioPlayer] Flushed all buffers")
     }
 
-    /// Enqueue translated audio data for playback
+    /// Enqueue translated audio data for playback (dropped if paused)
     func enqueueAudio(_ audioData: Data) {
-        guard isPlaying, let queue = audioQueue else { return }
+        guard isPlaying, !isPaused, let queue = audioQueue else { return }
 
         chunkCount += 1
         if chunkCount <= 5 || chunkCount % 100 == 0 {

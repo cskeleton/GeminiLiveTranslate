@@ -8,13 +8,24 @@ final class LatencyTracker: @unchecked Sendable {
     /// Pending send records, keyed by sequence number.
     private var pendingSends: [UInt64: CFAbsoluteTime] = [:]
     private var nextSeq: UInt64 = 0
-    private var smoothedLatency: Double = 0
+    /// Smoothed network round-trip latency (does NOT include AudioQueue buffer depth)
+    private var smoothedNetworkLatency: Double = 0
     private var hasInitialSample = false
 
     // Adaptive EMA: react faster to large changes, slower to small ones
     private let alphaFast: Double = 0.4   // Used when |sample - smoothed| > 1s
     private let alphaSlow: Double = 0.1   // Used for small fluctuations
     private let maxPending: Int = 500
+
+    /// Seed with an initial estimate so video delay isn't zero at startup.
+    /// Call before audio starts flowing. The EMA will quickly adapt to real values.
+    func seedLatency(_ seconds: Double) {
+        lock.withLock {
+            guard !hasInitialSample else { return }
+            smoothedNetworkLatency = seconds
+            hasInitialSample = true
+        }
+    }
 
     private let lock = OSAllocatedUnfairLock()
 
@@ -45,9 +56,8 @@ final class LatencyTracker: @unchecked Sendable {
         return lock.withLock {
             // Remove the matched send and compute precise round-trip
             guard let sendTime = pendingSends.removeValue(forKey: sendSeq) else {
-                // Fallback: use oldest pending send if seq not found
                 guard let oldest = pendingSends.min(by: { $0.key < $1.key }) else {
-                    return smoothedLatency
+                    return smoothedNetworkLatency
                 }
                 pendingSends.removeValue(forKey: oldest.key)
                 return updateEMA(sample: now - oldest.value)
@@ -61,7 +71,7 @@ final class LatencyTracker: @unchecked Sendable {
         let now = CFAbsoluteTimeGetCurrent()
         return lock.withLock {
             guard let oldest = pendingSends.min(by: { $0.key < $1.key }) else {
-                return smoothedLatency
+                return smoothedNetworkLatency
             }
             pendingSends.removeValue(forKey: oldest.key)
             return updateEMA(sample: now - oldest.value)
@@ -70,15 +80,26 @@ final class LatencyTracker: @unchecked Sendable {
 
     /// Current smoothed latency estimate, plus optional extra (e.g. AudioQueue buffer depth).
     func currentLatency(extra: Double = 0) -> Double {
-        lock.withLock { smoothedLatency + extra }
+        lock.withLock { smoothedNetworkLatency + extra }
     }
 
-    /// Reset all state (call when translation stops).
+    /// Reset pending sends but keep the last latency as seed for recalibration.
+    /// Used on resume/seek so the video delay doesn't jump to zero.
+    func resetForRecalibration() {
+        lock.withLock {
+            pendingSends.removeAll()
+            nextSeq = 0
+            // Keep smoothedNetworkLatency and hasInitialSample — EMA will converge
+            // from the last known value as new samples arrive
+        }
+    }
+
+    /// Full reset — zero everything (used when translation stops entirely).
     func reset() {
         lock.withLock {
             pendingSends.removeAll()
             nextSeq = 0
-            smoothedLatency = 0
+            smoothedNetworkLatency = 0
             hasInitialSample = false
         }
     }
@@ -87,18 +108,18 @@ final class LatencyTracker: @unchecked Sendable {
 
     private func updateEMA(sample: Double) -> Double {
         // Clamp to reasonable range (0.05s – 30s) to reject outliers
-        guard sample > 0.05 && sample < 30 else { return smoothedLatency }
+        guard sample > 0.05 && sample < 30 else { return smoothedNetworkLatency }
 
         if !hasInitialSample {
             // First sample: initialize directly
-            smoothedLatency = sample
+            smoothedNetworkLatency = sample
             hasInitialSample = true
         } else {
             // Adaptive alpha: react faster to large changes
-            let delta = abs(sample - smoothedLatency)
+            let delta = abs(sample - smoothedNetworkLatency)
             let alpha = delta > 1.0 ? alphaFast : alphaSlow
-            smoothedLatency = alpha * sample + (1 - alpha) * smoothedLatency
+            smoothedNetworkLatency = alpha * sample + (1 - alpha) * smoothedNetworkLatency
         }
-        return smoothedLatency
+        return smoothedNetworkLatency
     }
 }

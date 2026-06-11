@@ -125,12 +125,19 @@ class TranslationEngine {
                     // Handle flush signals from IINA plugin (seek/file-change)
                     server.onFlush = {
                         player.flush()
-                        tracker.reset()
+                        tracker.resetForRecalibration()
                     }
-                    // Handle resume signal — reset latency tracker to recalibrate
+                    // Handle pause — freeze AudioQueue in place
+                    server.onPause = {
+                        player.pause()
+                    }
+                    // Handle resume — unfreeze AudioQueue, recalibrate latency
                     server.onResume = {
-                        tracker.reset()
+                        player.resume()
+                        tracker.resetForRecalibration()
                     }
+                    // Seed with a conservative estimate so video isn't delayed at zero
+                    tracker.seedLatency(2.0)
                     try server.start()
                     server.startBroadcasting()
                     webSocketServer = server

@@ -14,6 +14,8 @@ final class WebSocketServer: @unchecked Sendable {
     private var broadcastTimer: DispatchSourceTimer?
     /// Called when a flush request is received (seek/file-change from IINA plugin)
     var onFlush: (() -> Void)?
+    /// Called when a pause request is received
+    var onPause: (() -> Void)?
     /// Called when a resume request is received (after pause)
     var onResume: (() -> Void)?
     private let lock = OSAllocatedUnfairLock()
@@ -184,7 +186,15 @@ final class WebSocketServer: @unchecked Sendable {
             return
         }
 
-        // POST /resume — recalibrate after pause
+        // POST /pause — freeze AudioQueue in place
+        if method == "POST" && path == "/pause" {
+            log("Pause request received")
+            onPause?()
+            respondJSON(connection, status: "200 OK", body: "{\"ok\":true}")
+            return
+        }
+
+        // POST /resume — unfreeze AudioQueue, recalibrate
         if method == "POST" && path == "/resume" {
             log("Resume request received")
             onResume?()

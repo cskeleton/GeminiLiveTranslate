@@ -28,7 +28,22 @@ function init() {
       startPolling();
     }
 
-    // --- Seek or file change → flush stale translated audio ---
+    // --- Pause → freeze translated audio at current position ---
+    iina.event.on("mpv.paused", function () {
+      iina.console.log("[GeminiSync] Paused → sending pause");
+      sendPause();
+    });
+
+    // --- Resume from pause → unfreeze, recalibrate latency ---
+    iina.event.on("mpv.unpaused", function () {
+      iina.console.log("[GeminiSync] Unpaused → sending resume");
+      sendResume();
+      if (currentDelay > 0) {
+        iina.mpv.set("audio-delay", -currentDelay);
+      }
+    });
+
+    // --- Seek → flush stale translated audio, recalibrate ---
     iina.event.on("mpv.seek", function () {
       iina.console.log("[GeminiSync] Seek → sending flush");
       sendFlush();
@@ -42,20 +57,19 @@ function init() {
       }
     });
 
-    // --- Resume from pause → recalibrate latency ---
-    iina.event.on("mpv.unpaused", function () {
-      iina.console.log("[GeminiSync] Unpaused → sending resume signal");
-      sendResume();
-      if (currentDelay > 0) {
-        iina.mpv.set("audio-delay", -currentDelay);
-      }
-    });
-
     initialized = true;
     iina.console.log("[GeminiSync] Initialization complete");
   } catch (e) {
     iina.console.log("[GeminiSync] Init error: " + e);
   }
+}
+
+// --- Pause: freeze translated audio at current position ---
+function sendPause() {
+  var url = "http://127.0.0.1:" + serverPort + "/pause";
+  iina.http.post(url, {}).then(function () {
+    iina.console.log("[GeminiSync] Pause acknowledged");
+  }).catch(function () {});
 }
 
 // --- Flush: clear stale audio buffers (seek/file-change only) ---
