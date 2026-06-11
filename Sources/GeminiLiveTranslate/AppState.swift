@@ -56,6 +56,10 @@ class AppState: ObservableObject {
     @AppStorage("subtitleFontSize") var subtitleFontSize: Double = 22.0
     @AppStorage("originalAudioVolume") var originalAudioVolume: Double = 0.15
 
+    // MARK: - IINA Sync Settings
+    @AppStorage("enableIINASync") var enableIINASync: Bool = false
+    @AppStorage("iinaSyncPort") var iinaSyncPort: Int = 18930
+
     // MARK: - Runtime State
     @Published var isTranslating: Bool = false
     @Published var lastInputText: String = ""
@@ -63,6 +67,10 @@ class AppState: ObservableObject {
     @Published var detectedLanguage: String = ""
     @Published var errorMessage: String?
     @Published var statusMessage: String = "Ready"
+
+    // MARK: - IINA Sync Runtime State
+    @Published var currentLatency: Double = 0.0
+    @Published var iinaSyncServerRunning: Bool = false
 
     // MARK: - Subtitle File
     var subtitleFileURL: URL? {

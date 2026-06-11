@@ -119,6 +119,57 @@ struct SettingsView: View {
 
             Divider().padding(.vertical, 4)
 
+            // IINA Video Sync
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("IINA Video Sync")
+                        .font(.headline)
+                    Spacer()
+                    if appState.iinaSyncServerRunning {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 8, height: 8)
+                        Text("Listening")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Toggle("Delay IINA video to match translated audio", isOn: $appState.enableIINASync)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if appState.enableIINASync {
+                    HStack {
+                        Text("Port")
+                        Spacer()
+                        TextField("", value: $appState.iinaSyncPort, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 80)
+                            .monospacedDigit()
+                            .disabled(appState.isTranslating)
+                    }
+
+                    if appState.isTranslating {
+                        HStack {
+                            Text("Current latency:")
+                            Spacer()
+                            Text("\(String(format: "%.1f", appState.currentLatency))s")
+                                .monospacedDigit()
+                                .foregroundStyle(.cyan)
+                        }
+                        .font(.caption)
+                    }
+
+                    Text("Install the GeminiLiveSync plugin in IINA, then start translation here. The plugin will automatically delay the video to sync with translated audio.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.vertical, 8)
+
+            Divider().padding(.vertical, 4)
+
             // Status & Controls
             VStack(spacing: 8) {
                 HStack {

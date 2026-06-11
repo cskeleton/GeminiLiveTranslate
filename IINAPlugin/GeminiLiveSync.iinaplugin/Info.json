@@ -1,0 +1,18 @@
+{
+  "name": "Gemini Live Sync",
+  "identifier": "com.geminilivetranslate.sync",
+  "version": "1.0.0",
+  "author": {
+    "name": "GeminiLiveTranslate"
+  },
+  "description": "Delays IINA video to sync with GeminiLiveTranslate's translated audio output.",
+  "entry": "main.js",
+  "permissions": ["show-osd", "network-request"],
+  "allowedDomains": ["127.0.0.1", "localhost"],
+  "preferenceDefaults": {
+    "autoMode": true,
+    "serverPort": "18930",
+    "manualDelay": "2.0",
+    "showOSD": true
+  }
+}

@@ -8,6 +8,8 @@ class TranslationEngine {
     private var audioCapture: SystemAudioCapture?
     private var geminiSocket: GeminiWebSocket?
     private var audioPlayer: AudioPlayer?
+    private var latencyTracker: LatencyTracker?
+    private var webSocketServer: WebSocketServer?
 
     private let apiKey: String
     private let targetLanguageCode: String
@@ -63,8 +65,15 @@ class TranslationEngine {
 
             // Audio playback is thread-safe (AudioQueue uses its own thread)
             // Capture player directly — don't go through @MainActor self
-            socket.onAudioData = { audioData in
+            socket.onAudioData = { [weak self] audioData in
                 player.enqueueAudio(audioData)
+                if let latency = self?.latencyTracker?.recordReceive() {
+                    let msg = "{\"latency\":\(String(format: "%.2f", latency)),\"isTranslating\":true}"
+                    self?.webSocketServer?.updateLatency(msg)
+                    Task { @MainActor in
+                        AppState.shared.currentLatency = latency
+                    }
+                }
             }
 
             socket.onError = { [weak self] error in
@@ -83,6 +92,7 @@ class TranslationEngine {
             let capture = SystemAudioCapture()
             capture.onAudioChunk = { [weak self] pcmData in
                 Task { @MainActor in
+                    self?.latencyTracker?.recordSend()
                     self?.geminiSocket?.sendAudioChunk(pcmData)
                 }
             }
@@ -94,6 +104,23 @@ class TranslationEngine {
             }
             try await capture.startCapture()
             audioCapture = capture
+
+            // 5. Start IINA sync server if enabled
+            if AppState.shared.enableIINASync {
+                let tracker = LatencyTracker()
+                latencyTracker = tracker
+
+                let server = WebSocketServer(port: UInt16(AppState.shared.iinaSyncPort))
+                do {
+                    try server.start()
+                    server.startBroadcasting()
+                    webSocketServer = server
+                    AppState.shared.iinaSyncServerRunning = true
+                } catch {
+                    AppState.shared.errorMessage = "IINA sync server failed: \(error.localizedDescription)"
+                    // Translation continues without sync — non-fatal
+                }
+            }
 
             isRunning = true
             isTransitioning = false
@@ -135,6 +162,15 @@ class TranslationEngine {
         audioPlayer = nil
 
         closeSubtitleFile()
+
+        // Stop IINA sync server
+        webSocketServer?.broadcast("{\"latency\":0,\"isTranslating\":false}")
+        webSocketServer?.stop()
+        webSocketServer = nil
+        latencyTracker?.reset()
+        latencyTracker = nil
+        AppState.shared.currentLatency = 0
+        AppState.shared.iinaSyncServerRunning = false
 
         isTransitioning = false
 
