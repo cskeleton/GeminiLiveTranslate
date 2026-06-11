@@ -122,9 +122,13 @@ class TranslationEngine {
 
                 let server = WebSocketServer(port: UInt16(AppState.shared.iinaSyncPort))
                 do {
-                    // Handle flush signals from IINA plugin (pause/seek)
+                    // Handle flush signals from IINA plugin (seek/file-change)
                     server.onFlush = {
                         player.flush()
+                        tracker.reset()
+                    }
+                    // Handle resume signal — reset latency tracker to recalibrate
+                    server.onResume = {
                         tracker.reset()
                     }
                     try server.start()

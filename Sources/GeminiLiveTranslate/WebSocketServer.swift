@@ -12,8 +12,10 @@ final class WebSocketServer: @unchecked Sendable {
     private var upgradedConnections: Set<ObjectIdentifier> = []
     private var lastBroadcastJSON: String = "{\"latency\":0,\"isTranslating\":false}"
     private var broadcastTimer: DispatchSourceTimer?
-    /// Called when a flush request is received (pause/seek from IINA plugin)
+    /// Called when a flush request is received (seek/file-change from IINA plugin)
     var onFlush: (() -> Void)?
+    /// Called when a resume request is received (after pause)
+    var onResume: (() -> Void)?
     private let lock = OSAllocatedUnfairLock()
 
     init(port: UInt16 = 18930) {
@@ -174,10 +176,18 @@ final class WebSocketServer: @unchecked Sendable {
         let method = parts.count > 0 ? String(parts[0]).uppercased() : "GET"
         let path = parts.count > 1 ? String(parts[1]) : "/"
 
-        // POST /flush — clear audio buffers (pause/seek)
+        // POST /flush — clear audio buffers (seek/file-change)
         if method == "POST" && path == "/flush" {
             log("Flush request received")
             onFlush?()
+            respondJSON(connection, status: "200 OK", body: "{\"ok\":true}")
+            return
+        }
+
+        // POST /resume — recalibrate after pause
+        if method == "POST" && path == "/resume" {
+            log("Resume request received")
+            onResume?()
             respondJSON(connection, status: "200 OK", body: "{\"ok\":true}")
             return
         }
