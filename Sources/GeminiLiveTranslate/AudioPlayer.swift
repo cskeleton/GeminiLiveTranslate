@@ -3,17 +3,24 @@ import Foundation
 @preconcurrency import AudioToolbox
 
 /// Plays back translated audio received from Gemini (24kHz, mono, Int16 PCM)
+/// Uses a ring of AudioQueue buffers with pre-buffering to avoid gaps
 final class AudioPlayer: @unchecked Sendable {
     private var audioQueue: AudioQueueRef?
     private var isPlaying = false
     private let sampleRate: Double = 24000
     private let channels: UInt32 = 1
     private let bitsPerSample: UInt32 = 16
-    private let bufferCount: Int = 3
+    private let bufferCount: Int = 8  // More buffers = more resilience to jitter
     private var buffers: [AudioQueueBufferRef] = []
+    private let bufferQueue = DispatchQueue(label: "com.gemini.audioplayer.buffers")
 
-    /// Callback when audio finishes playing (all buffers drained)
-    var onPlaybackFinished: (() -> Void)?
+    // Pre-buffering: wait for this many chunks before starting playback
+    private let preBufferCount = 4
+    private var chunksReceived = 0
+    private var playbackStarted = false
+    private var pendingAudio: [Data] = []
+
+    private var chunkCount = 0
 
     init() {}
 
@@ -51,8 +58,8 @@ final class AudioPlayer: @unchecked Sendable {
             throw PlayerError.failedToCreateQueue(status)
         }
 
-        // Allocate buffers — must be large enough for Gemini's chunks (~12000 bytes / 250ms)
-        let bufferSize = UInt32(sampleRate * 0.5 * Double(channels) * Double(bitsPerSample / 8)) // 500ms buffer
+        // Allocate buffers — 500ms each, enough for any Gemini chunk
+        let bufferSize = UInt32(sampleRate * 0.5 * Double(channels) * Double(bitsPerSample / 8))
         for _ in 0..<bufferCount {
             var buffer: AudioQueueBufferRef?
             AudioQueueAllocateBuffer(queue, bufferSize, &buffer)
@@ -61,20 +68,17 @@ final class AudioPlayer: @unchecked Sendable {
             }
         }
 
-        // Prime the queue with empty buffers
-        for buffer in buffers {
-            buffer.pointee.mAudioDataByteSize = 0
-            AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
-        }
-
         isPlaying = true
-        AudioQueueStart(queue, nil)
+        // Don't start the queue yet — wait for pre-buffer
     }
 
     /// Stop playback and clean up
     func stop() {
         guard isPlaying else { return }
         isPlaying = false
+        playbackStarted = false
+        chunksReceived = 0
+        pendingAudio.removeAll()
 
         if let queue = audioQueue {
             AudioQueueStop(queue, true)
@@ -84,27 +88,56 @@ final class AudioPlayer: @unchecked Sendable {
         buffers.removeAll()
     }
 
-    private var chunkCount = 0
-
     /// Enqueue translated audio data for playback
-    /// - Parameter audioData: Raw PCM 24kHz mono Int16 audio data from Gemini
     func enqueueAudio(_ audioData: Data) {
-        guard isPlaying, let queue = audioQueue else {
-            print("[AudioPlayer] ⚠️ Not playing, dropping \(audioData.count) bytes")
-            return
-        }
+        guard isPlaying else { return }
 
         chunkCount += 1
-        if chunkCount <= 3 || chunkCount % 50 == 0 {
+        if chunkCount <= 5 || chunkCount % 100 == 0 {
             print("[AudioPlayer] Chunk #\(chunkCount): \(audioData.count) bytes")
         }
 
-        // Find an available buffer
+        bufferQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            if !self.playbackStarted {
+                // Pre-buffer phase: collect chunks before starting playback
+                self.pendingAudio.append(audioData)
+                self.chunksReceived += 1
+
+                if self.chunksReceived >= self.preBufferCount {
+                    print("[AudioPlayer] Pre-buffered \(self.chunksReceived) chunks, starting playback")
+                    self.playbackStarted = true
+
+                    // Flush all pending audio into buffers and start the queue
+                    for chunk in self.pendingAudio {
+                        self.enqueueToBuffer(chunk)
+                    }
+                    self.pendingAudio.removeAll()
+
+                    if let queue = self.audioQueue {
+                        AudioQueueStart(queue, nil)
+                    }
+                }
+            } else {
+                // Normal playback: enqueue directly
+                self.enqueueToBuffer(audioData)
+            }
+        }
+    }
+
+    /// Internal: copy audio data into an available buffer and enqueue it
+    private func enqueueToBuffer(_ audioData: Data) {
+        guard let queue = audioQueue else { return }
+
+        // Find an available buffer (mAudioDataByteSize == 0 means it's been consumed)
         guard let buffer = buffers.first(where: { $0.pointee.mAudioDataByteSize == 0 }) else {
-            if chunkCount <= 3 {
+            // All buffers busy — this is normal during steady-state playback
+            // The callback will re-enqueue buffers as they finish playing
+            if chunkCount <= 5 {
                 print("[AudioPlayer] ⚠️ All buffers busy, dropping chunk")
             }
-            return // All buffers busy, skip this chunk
+            return
         }
 
         let dataSize = min(audioData.count, Int(buffer.pointee.mAudioDataBytesCapacity))
