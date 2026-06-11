@@ -122,6 +122,11 @@ class TranslationEngine {
 
                 let server = WebSocketServer(port: UInt16(AppState.shared.iinaSyncPort))
                 do {
+                    // Handle flush signals from IINA plugin (pause/seek)
+                    server.onFlush = {
+                        player.flush()
+                        tracker.reset()
+                    }
                     try server.start()
                     server.startBroadcasting()
                     webSocketServer = server

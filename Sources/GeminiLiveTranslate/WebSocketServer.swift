@@ -12,6 +12,8 @@ final class WebSocketServer: @unchecked Sendable {
     private var upgradedConnections: Set<ObjectIdentifier> = []
     private var lastBroadcastJSON: String = "{\"latency\":0,\"isTranslating\":false}"
     private var broadcastTimer: DispatchSourceTimer?
+    /// Called when a flush request is received (pause/seek from IINA plugin)
+    var onFlush: (() -> Void)?
     private let lock = OSAllocatedUnfairLock()
 
     init(port: UInt16 = 18930) {
@@ -132,7 +134,7 @@ final class WebSocketServer: @unchecked Sendable {
             if request.lowercased().contains("upgrade: websocket") {
                 self.handleWebSocketUpgrade(connection, request: request)
             } else {
-                self.handleHTTPRequest(connection)
+                self.handleHTTPRequest(connection, request: request)
             }
         }
     }
@@ -166,10 +168,27 @@ final class WebSocketServer: @unchecked Sendable {
         })
     }
 
-    private func handleHTTPRequest(_ connection: NWConnection) {
-        // Return current latency data as HTTP JSON (used by IINA plugin polling)
+    private func handleHTTPRequest(_ connection: NWConnection, request: String) {
+        let firstLine = request.components(separatedBy: "\r\n").first ?? ""
+        let parts = firstLine.split(separator: " ")
+        let method = parts.count > 0 ? String(parts[0]).uppercased() : "GET"
+        let path = parts.count > 1 ? String(parts[1]) : "/"
+
+        // POST /flush — clear audio buffers (pause/seek)
+        if method == "POST" && path == "/flush" {
+            log("Flush request received")
+            onFlush?()
+            respondJSON(connection, status: "200 OK", body: "{\"ok\":true}")
+            return
+        }
+
+        // GET / — return current latency (IINA plugin polling)
         let body = lock.withLock { lastBroadcastJSON }
-        let response = "HTTP/1.1 200 OK\r\n" +
+        respondJSON(connection, status: "200 OK", body: body)
+    }
+
+    private func respondJSON(_ connection: NWConnection, status: String, body: String) {
+        let response = "HTTP/1.1 \(status)\r\n" +
             "Content-Type: application/json\r\n" +
             "Content-Length: \(body.utf8.count)\r\n" +
             "Connection: close\r\n" +

@@ -90,6 +90,22 @@ final class AudioPlayer: @unchecked Sendable {
         buffers.removeAll()
     }
 
+    /// Flush all buffered audio (used on pause/seek to prevent desync)
+    func flush() {
+        guard isPlaying, let queue = audioQueue else { return }
+        // Stop the queue, reset all buffers, restart
+        AudioQueueStop(queue, true)
+        for buffer in buffers {
+            buffer.pointee.mAudioDataByteSize = 0
+        }
+        // Re-prime and restart
+        for buffer in buffers {
+            AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
+        }
+        AudioQueueStart(queue, nil)
+        print("[AudioPlayer] Flushed all buffers")
+    }
+
     /// Enqueue translated audio data for playback
     func enqueueAudio(_ audioData: Data) {
         guard isPlaying, let queue = audioQueue else { return }

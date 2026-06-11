@@ -13,7 +13,6 @@ var initialized = false;
 // --- Plugin Initialization ---
 function init() {
   try {
-    // Load preferences
     autoMode = iina.preferences.get("autoMode");
     if (autoMode === null || autoMode === undefined) autoMode = true;
     serverPort = parseInt(iina.preferences.get("serverPort") || "18930", 10);
@@ -23,17 +22,27 @@ function init() {
 
     iina.console.log("[GeminiSync] Plugin loaded. autoMode=" + autoMode + " port=" + serverPort);
 
-    // Register menu items
     setupMenu();
 
-    // Start polling if auto mode
     if (autoMode) {
       startPolling();
     }
 
-    // Re-apply delay on file load (mpv may reset it)
+    // --- Detect pause/seek → flush translated audio buffers ---
+    iina.event.on("mpv.paused", function () {
+      iina.console.log("[GeminiSync] Paused → sending flush");
+      sendFlush();
+    });
+
+    iina.event.on("mpv.seek", function () {
+      iina.console.log("[GeminiSync] Seek → sending flush");
+      sendFlush();
+    });
+
+    // Re-apply delay on file load
     iina.event.on("mpv.file-loaded", function () {
       iina.console.log("[GeminiSync] File loaded, currentDelay=" + currentDelay);
+      sendFlush();
       if (currentDelay > 0) {
         iina.mpv.set("audio-delay", -currentDelay);
       }
@@ -50,6 +59,16 @@ function init() {
   } catch (e) {
     iina.console.log("[GeminiSync] Init error: " + e);
   }
+}
+
+// --- Flush: tell GeminiLiveTranslate to clear audio buffers ---
+function sendFlush() {
+  var url = "http://127.0.0.1:" + serverPort + "/flush";
+  iina.http.post(url, {}).then(function () {
+    iina.console.log("[GeminiSync] Flush acknowledged");
+  }).catch(function () {
+    // Server might not be running, ignore
+  });
 }
 
 // --- HTTP Polling ---
@@ -124,7 +143,6 @@ function setDelay(seconds) {
 
   var oldDelay = currentDelay;
   currentDelay = rounded;
-  // Negative audio-delay = audio plays ahead of video = video is delayed
   iina.mpv.set("audio-delay", -rounded);
   iina.console.log("[GeminiSync] Delay set: " + oldDelay.toFixed(1) + "s -> " + rounded.toFixed(1) + "s");
 
