@@ -67,12 +67,13 @@ class TranslationEngine {
             // Capture player directly — don't go through @MainActor self
             socket.onAudioData = { [weak self] audioData in
                 player.enqueueAudio(audioData)
-                if let latency = self?.latencyTracker?.recordReceive() {
-                    let msg = "{\"latency\":\(String(format: "%.2f", latency)),\"isTranslating\":true}"
-                    self?.webSocketServer?.updateLatency(msg)
-                    Task { @MainActor in
-                        AppState.shared.currentLatency = latency
-                    }
+                let networkLatency = self?.latencyTracker?.recordReceive() ?? 0
+                let bufferLatency = player.bufferLatency
+                let totalLatency = self?.latencyTracker?.currentLatency(extra: bufferLatency) ?? networkLatency
+                let msg = "{\"latency\":\(String(format: "%.2f", totalLatency)),\"isTranslating\":true}"
+                self?.webSocketServer?.updateLatency(msg)
+                Task { @MainActor in
+                    AppState.shared.currentLatency = totalLatency
                 }
             }
 

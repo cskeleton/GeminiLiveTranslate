@@ -14,6 +14,16 @@ final class AudioPlayer: @unchecked Sendable {
 
     private var chunkCount = 0
 
+    /// Number of buffers currently filled and queued for playback (0...bufferCount).
+    var filledBufferCount: Int {
+        buffers.filter { $0.pointee.mAudioDataByteSize > 0 }.count
+    }
+
+    /// Estimated playback latency from buffer depth, in seconds.
+    var bufferLatency: Double {
+        Double(filledBufferCount) * 0.5  // Each buffer is 500ms
+    }
+
     init() {}
 
     deinit {
