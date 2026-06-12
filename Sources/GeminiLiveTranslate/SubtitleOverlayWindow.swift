@@ -188,8 +188,6 @@ class SubtitleOverlayWindow: NSWindowController {
             }
         })
     }
-
-    nonisolated deinit {}
 }
 
 // MARK: - PaddedLabel: rounded-rect background label
