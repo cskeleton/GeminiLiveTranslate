@@ -1,0 +1,61 @@
+name: Build Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with Swift
+        run: swift build -c release
+
+      - name: Create distribution package
+        run: |
+          EXECUTABLE_PATH=".build/release/GeminiLiveTranslate"
+          PLUGIN_SOURCE="IINAPlugin/GeminiLiveSync.iinaplugin"
+          DIST_DIR="dist"
+          mkdir -p "$DIST_DIR"
+
+          # Copy executable
+          cp "$EXECUTABLE_PATH" "$DIST_DIR/"
+
+          # Copy IINA plugin
+          cp -r "$PLUGIN_SOURCE" "$DIST_DIR/"
+
+          # Create tarball
+          cd "$DIST_DIR"
+          tar -czf ../GeminiLiveTranslate-macos.tar.gz .
+          cd ..
+
+      - name: Get version from tag
+        id: tag_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "GeminiLiveTranslate-macos.tar.gz"
+          body: |
+            macOS release of GeminiLiveTranslate
+
+            ## Contents
+            - `GeminiLiveTranslate` - Main application executable
+            - `GeminiLiveSync.iinaplugin/` - IINA player plugin
+
+            ## Installation
+            1. Extract the archive
+            2. Copy `GeminiLiveTranslate` to `~/.local/bin/` or your preferred location
+            3. Copy `GeminiLiveSync.iinaplugin` to `~/.config/iina/plugins/` (create if doesn't exist)
+            4. Restart IINA to load the plugin
+
+            ## Requirements
+            - macOS 14 or later
+            - IINA player (for plugin)
+            - Gemini API key
+          draft: false
+          prerelease: false
