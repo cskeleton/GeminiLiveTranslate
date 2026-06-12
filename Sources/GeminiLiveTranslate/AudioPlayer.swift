@@ -1,28 +1,48 @@
 import Foundation
 @preconcurrency import AVFoundation
 @preconcurrency import AudioToolbox
+import os
 
-/// Plays back translated audio received from Gemini (24kHz, mono, Int16 PCM)
+/// Plays back translated audio received from Gemini (24kHz, mono, Int16 PCM).
+///
+/// Incoming chunks land in a FIFO jitter buffer; the AudioQueue callback pulls
+/// from the FIFO as buffers complete, filling with silence when nothing is
+/// pending. Bursts from Gemini (faster than real-time) are never dropped, and
+/// audio arriving while paused is kept for playback after resume.
 final class AudioPlayer: @unchecked Sendable {
-    private var audioQueue: AudioQueueRef?
-    private var isPlaying = false
     private let sampleRate: Double = 24000
     private let channels: UInt32 = 1
     private let bitsPerSample: UInt32 = 16
-    private let bufferCount: Int = 6
+    private let bytesPerSecond = 48_000           // 24kHz * 2 bytes, mono
+
+    private let bufferCount = 4
+    private let bufferCapacityBytes: UInt32 = 9600  // 200ms per AudioQueue buffer
+    private let silenceFillBytes = 2400             // 50ms of silence when FIFO is empty
+    private let maxPendingBytes = 60 * 48_000       // FIFO safety cap (60s)
+
+    private let lock = OSAllocatedUnfairLock()
+    // All state below is protected by `lock`. AudioQueue API calls happen
+    // outside the lock except AudioQueueEnqueueBuffer (safe: it never invokes
+    // the output callback synchronously).
+    private var audioQueue: AudioQueueRef?
     private var buffers: [AudioQueueBufferRef] = []
-
-    private var chunkCount = 0
+    private var pendingData = Data()
+    /// Real (non-silence) audio bytes inside each currently-enqueued buffer.
+    private var inFlightBytes: [AudioQueueBufferRef: Int] = [:]
+    /// Buffers returned by the callback during AudioQueueReset, re-enqueued after.
+    private var parkedBuffers: [AudioQueueBufferRef] = []
+    private var isPlaying = false
     private var isPaused = false
+    private var isResetting = false
+    private var chunkCount = 0
 
-    /// Number of buffers currently filled and queued for playback (0...bufferCount).
-    var filledBufferCount: Int {
-        buffers.filter { $0.pointee.mAudioDataByteSize > 0 }.count
-    }
-
-    /// Estimated playback latency from buffer depth, in seconds.
-    var bufferLatency: Double {
-        Double(filledBufferCount) * 0.5  // Each buffer is 500ms
+    /// Duration of real audio waiting to be heard, in seconds:
+    /// FIFO backlog plus audio already handed to the AudioQueue.
+    var queuedDuration: Double {
+        lock.lock()
+        defer { lock.unlock() }
+        let bytes = pendingData.count + inFlightBytes.values.reduce(0, +)
+        return Double(bytes) / Double(bytesPerSecond)
     }
 
     init() {}
@@ -33,7 +53,12 @@ final class AudioPlayer: @unchecked Sendable {
 
     /// Start the audio playback system
     func start() throws {
-        guard !isPlaying else { return }
+        lock.lock()
+        if isPlaying {
+            lock.unlock()
+            return
+        }
+        lock.unlock()
 
         var streamDesc = AudioStreamBasicDescription(
             mSampleRate: sampleRate,
@@ -47,6 +72,7 @@ final class AudioPlayer: @unchecked Sendable {
             mReserved: 0
         )
 
+        var queueRef: AudioQueueRef?
         let status = AudioQueueNewOutput(
             &streamDesc,
             audioQueueCallback,
@@ -54,112 +80,170 @@ final class AudioPlayer: @unchecked Sendable {
             nil,
             nil,
             0,
-            &audioQueue
+            &queueRef
         )
 
-        guard status == noErr, let queue = audioQueue else {
+        guard status == noErr, let queue = queueRef else {
             throw PlayerError.failedToCreateQueue(status)
         }
 
-        // Allocate buffers — 500ms each
-        let bufferSize = UInt32(sampleRate * 0.5 * Double(channels) * Double(bitsPerSample / 8))
+        lock.lock()
+        audioQueue = queue
+        isPlaying = true
+        isPaused = false
+        lock.unlock()
+
+        // Allocate buffers and prime them (with silence, FIFO is empty)
         for _ in 0..<bufferCount {
             var buffer: AudioQueueBufferRef?
-            AudioQueueAllocateBuffer(queue, bufferSize, &buffer)
+            AudioQueueAllocateBuffer(queue, bufferCapacityBytes, &buffer)
             if let buffer = buffer {
-                // Prime with empty buffer so the queue can start
-                buffer.pointee.mAudioDataByteSize = 0
-                AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
+                lock.lock()
                 buffers.append(buffer)
+                fillAndEnqueue(buffer, queue: queue)
+                lock.unlock()
             }
         }
 
-        isPlaying = true
         AudioQueueStart(queue, nil)
     }
 
     /// Stop playback and clean up
     func stop() {
-        guard isPlaying else { return }
-        isPlaying = false
-
-        if let queue = audioQueue {
-            AudioQueueStop(queue, true)
-            AudioQueueDispose(queue, true)
+        lock.lock()
+        guard isPlaying else {
+            lock.unlock()
+            return
         }
+        isPlaying = false
+        isPaused = false
+        pendingData.removeAll()
+        inFlightBytes.removeAll()
+        let queue = audioQueue
         audioQueue = nil
+        lock.unlock()
+        guard let queue = queue else { return }
+
+        AudioQueueStop(queue, true)
+        AudioQueueDispose(queue, true)
+
+        lock.lock()
         buffers.removeAll()
+        parkedBuffers.removeAll()
+        lock.unlock()
     }
 
-    /// Pause playback — freezes the AudioQueue in place, buffers preserved.
-    /// Incoming audio during pause is dropped.
+    /// Pause playback — freezes the AudioQueue in place. Incoming audio keeps
+    /// accumulating in the FIFO (it belongs to content the viewer hasn't lost).
     func pause() {
-        guard isPlaying, !isPaused, let queue = audioQueue else { return }
+        lock.lock()
+        guard isPlaying, !isPaused, let queue = audioQueue else {
+            lock.unlock()
+            return
+        }
         isPaused = true
+        lock.unlock()
         AudioQueuePause(queue)
         print("[AudioPlayer] Paused")
     }
 
     /// Resume playback from where it was paused.
     func resume() {
-        guard isPlaying, isPaused, let queue = audioQueue else { return }
+        lock.lock()
+        guard isPlaying, isPaused, let queue = audioQueue else {
+            lock.unlock()
+            return
+        }
         isPaused = false
+        lock.unlock()
         AudioQueueStart(queue, nil)
         print("[AudioPlayer] Resumed")
     }
 
-    /// Flush all buffered audio (used on seek/file-change to discard stale data)
+    /// Discard all buffered audio (seek/file-change). Keeps the queue running
+    /// and preserves pause state.
     func flush() {
-        guard isPlaying, let queue = audioQueue else { return }
-        isPaused = false
-        AudioQueueStop(queue, true)
-        for buffer in buffers {
-            buffer.pointee.mAudioDataByteSize = 0
+        lock.lock()
+        guard isPlaying, let queue = audioQueue else {
+            lock.unlock()
+            return
         }
-        for buffer in buffers {
-            AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
+        pendingData.removeAll()
+        isResetting = true
+        lock.unlock()
+
+        // Returns in-flight buffers via the output callback; the callback parks
+        // them while isResetting so they aren't re-enqueued mid-reset.
+        AudioQueueReset(queue)
+
+        lock.lock()
+        isResetting = false
+        for buffer in parkedBuffers {
+            fillAndEnqueue(buffer, queue: queue)
         }
-        AudioQueueStart(queue, nil)
-        print("[AudioPlayer] Flushed all buffers")
+        parkedBuffers.removeAll()
+        lock.unlock()
+        print("[AudioPlayer] Flushed")
     }
 
-    /// Enqueue translated audio data for playback (dropped if paused)
+    /// Append translated audio to the FIFO. Never drops bursts; accepted while
+    /// paused too (played after resume).
     func enqueueAudio(_ audioData: Data) {
-        guard isPlaying, !isPaused, let queue = audioQueue else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard isPlaying else { return }
 
         chunkCount += 1
         if chunkCount <= 5 || chunkCount % 100 == 0 {
-            print("[AudioPlayer] Chunk #\(chunkCount): \(audioData.count) bytes")
+            print("[AudioPlayer] Chunk #\(chunkCount): \(audioData.count) bytes, FIFO: \(pendingData.count) bytes")
         }
 
-        // Find an available buffer (mAudioDataByteSize == 0 means it's done playing)
-        guard let buffer = buffers.first(where: { $0.pointee.mAudioDataByteSize == 0 }) else {
-            // All buffers still playing — skip this chunk (rare, means we're producing faster than playing)
-            return
+        pendingData.append(audioData)
+        if pendingData.count > maxPendingBytes {
+            let overflow = pendingData.count - maxPendingBytes
+            pendingData.removeFirst(overflow & ~1)
+            print("[AudioPlayer] FIFO overflow, dropped \(overflow) bytes")
         }
+    }
 
-        let dataSize = min(audioData.count, Int(buffer.pointee.mAudioDataBytesCapacity))
-        _ = audioData.withUnsafeBytes { rawBuffer in
-            memcpy(buffer.pointee.mAudioData, rawBuffer.baseAddress!, dataSize)
+    // MARK: - Buffer Filling
+
+    /// Fill a buffer from the FIFO (or with silence) and hand it to the queue.
+    /// Caller must hold `lock`.
+    private func fillAndEnqueue(_ buffer: AudioQueueBufferRef, queue: AudioQueueRef) {
+        let capacity = Int(buffer.pointee.mAudioDataBytesCapacity)
+        var size = min(pendingData.count & ~1, capacity)
+        if size > 0 {
+            _ = pendingData.withUnsafeBytes { raw in
+                memcpy(buffer.pointee.mAudioData, raw.baseAddress!, size)
+            }
+            pendingData.removeFirst(size)
+            inFlightBytes[buffer] = size
+        } else {
+            // Keep the queue rolling with a short stretch of silence
+            size = min(silenceFillBytes, capacity)
+            memset(buffer.pointee.mAudioData, 0, size)
+            inFlightBytes[buffer] = 0
         }
-        buffer.pointee.mAudioDataByteSize = UInt32(dataSize)
-
+        buffer.pointee.mAudioDataByteSize = UInt32(size)
         AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
     }
 
     // MARK: - Audio Queue Callback
-    // Called on the real-time audio thread when a buffer finishes playing
+    // Called on the AudioQueue's internal thread when a buffer finishes playing
 
     private let audioQueueCallback: AudioQueueOutputCallback = { (userData, queue, buffer) in
         guard let userData = userData else { return }
         let player = Unmanaged<AudioPlayer>.fromOpaque(userData).takeUnretainedValue()
 
-        // Mark buffer as available for reuse
-        buffer.pointee.mAudioDataByteSize = 0
-
-        // Re-enqueue for next audio chunk
-        if player.isPlaying {
-            AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
+        player.lock.lock()
+        defer { player.lock.unlock() }
+        player.inFlightBytes[buffer] = nil
+        guard player.isPlaying else { return }
+        if player.isResetting {
+            player.parkedBuffers.append(buffer)
+        } else {
+            player.fillAndEnqueue(buffer, queue: queue)
         }
     }
 

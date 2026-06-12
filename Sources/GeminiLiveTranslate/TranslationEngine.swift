@@ -22,7 +22,6 @@ class TranslationEngine {
 
     private(set) var isRunning = false
     private var isTransitioning = false  // Prevents concurrent start/stop
-    private var isPaused = false  // Video paused — skip latency updates
 
     init(apiKey: String, targetLanguageCode: String, showOverlay: Bool,
          writeToFile: Bool, subtitleFontSize: Double) {
@@ -49,12 +48,56 @@ class TranslationEngine {
             try player.start()
             audioPlayer = player
 
-            // 3. Connect to Gemini API
+            // 3. Latency tracker — one EMA sample per utterance
+            let tracker = LatencyTracker()
+            // Conservative estimate so video delay isn't zero before the first sample
+            tracker.seedLatency(2.0)
+            latencyTracker = tracker
+            AppState.shared.currentLatency = tracker.currentLatency()
+
+            // 4. Start IINA sync server if enabled (before the socket, so the
+            // receive path below can capture it directly)
+            var startedServer: WebSocketServer?
+            if AppState.shared.enableIINASync {
+                let server = WebSocketServer(port: UInt16(AppState.shared.iinaSyncPort))
+                do {
+                    // Seek/file-change: drop stale audio, keep the EMA
+                    server.onFlush = {
+                        player.flush()
+                        tracker.resetForRecalibration()
+                    }
+                    // Pause: freeze AudioQueue in place, stop sampling
+                    server.onPause = {
+                        player.pause()
+                        tracker.setPaused(true)
+                    }
+                    // Resume: unfreeze; tracker drops stale onsets, keeps EMA
+                    server.onResume = {
+                        player.resume()
+                        tracker.setPaused(false)
+                    }
+                    try server.start()
+                    server.startBroadcasting()
+                    // Publish the seed so the plugin applies an initial delay right away
+                    server.updateLatency(Self.latencyJSON(tracker.currentLatency()))
+                    webSocketServer = server
+                    startedServer = server
+                    AppState.shared.iinaSyncServerRunning = true
+                } catch {
+                    AppState.shared.errorMessage = "IINA sync server failed: \(error.localizedDescription)"
+                    // Translation continues without sync — non-fatal
+                }
+            }
+            let serverRef = startedServer
+
+            // 5. Connect to Gemini API
             let socket = GeminiWebSocket(apiKey: apiKey, targetLanguageCode: targetLanguageCode)
 
             socket.onInputTranscription = { [weak self] text, langCode in
-                // Delay subtitle to match audio playback (AudioQueue buffer depth)
-                let delay = player.bufferLatency
+                // Anchor utterance-start detection to the server's ASR stream
+                tracker.noteInputTranscription()
+                // Delay subtitle to match audio playback (queued backlog)
+                let delay = player.queuedDuration
                 Task { @MainActor [weak self] in
                     if delay > 0.05 {
                         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -64,7 +107,7 @@ class TranslationEngine {
             }
 
             socket.onOutputTranscription = { [weak self] text, langCode in
-                let delay = player.bufferLatency
+                let delay = player.queuedDuration
                 Task { @MainActor [weak self] in
                     if delay > 0.05 {
                         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -73,20 +116,21 @@ class TranslationEngine {
                 }
             }
 
-            // Audio playback is thread-safe (AudioQueue uses its own thread)
-            // Capture player directly — don't go through @MainActor self
-            socket.onAudioData = { [weak self] audioData in
+            // Receive path runs off the main actor; player/tracker/server are thread-safe.
+            // The latency only changes when a per-utterance sample is taken.
+            socket.onAudioData = { audioData in
+                let queuedBefore = player.queuedDuration
                 player.enqueueAudio(audioData)
-                // Skip latency updates when video is paused
-                guard self?.isPaused != true else { return }
-                let networkLatency = self?.latencyTracker?.recordReceive() ?? 0
-                let bufferLatency = player.bufferLatency
-                let totalLatency = self?.latencyTracker?.currentLatency(extra: bufferLatency) ?? networkLatency
-                let msg = "{\"latency\":\(String(format: "%.2f", totalLatency)),\"isTranslating\":true}"
-                self?.webSocketServer?.updateLatency(msg)
-                Task { @MainActor in
-                    AppState.shared.currentLatency = totalLatency
+                if let latency = tracker.noteAudioReceived(queuedDuration: queuedBefore) {
+                    serverRef?.updateLatency(Self.latencyJSON(latency))
+                    Task { @MainActor in
+                        AppState.shared.currentLatency = latency
+                    }
                 }
+            }
+
+            socket.onTurnComplete = {
+                tracker.noteTurnComplete()
             }
 
             socket.onError = { [weak self] error in
@@ -101,13 +145,10 @@ class TranslationEngine {
             geminiSocket = socket
             try await socket.connect()
 
-            // 4. Start audio capture
+            // 6. Start audio capture
             let capture = SystemAudioCapture()
-            capture.onAudioChunk = { [weak self] pcmData in
-                Task { @MainActor in
-                    self?.latencyTracker?.recordSend()
-                    self?.geminiSocket?.sendAudioChunk(pcmData)
-                }
+            capture.onAudioChunk = { [weak socket] pcmData in
+                socket?.sendAudioChunk(pcmData)
             }
             capture.onError = { [weak self] error in
                 Task { @MainActor in
@@ -117,42 +158,6 @@ class TranslationEngine {
             }
             try await capture.startCapture()
             audioCapture = capture
-
-            // 5. Start IINA sync server if enabled
-            if AppState.shared.enableIINASync {
-                let tracker = LatencyTracker()
-                latencyTracker = tracker
-
-                let server = WebSocketServer(port: UInt16(AppState.shared.iinaSyncPort))
-                do {
-                    // Handle flush signals from IINA plugin (seek/file-change)
-                    server.onFlush = { [weak self] in
-                        self?.isPaused = false
-                        player.flush()
-                        tracker.resetForRecalibration()
-                    }
-                    // Handle pause — freeze AudioQueue in place
-                    server.onPause = { [weak self] in
-                        self?.isPaused = true
-                        player.pause()
-                    }
-                    // Handle resume — unfreeze AudioQueue, recalibrate latency
-                    server.onResume = { [weak self] in
-                        self?.isPaused = false
-                        player.resume()
-                        tracker.resetForRecalibration()
-                    }
-                    // Seed with a conservative estimate so video isn't delayed at zero
-                    tracker.seedLatency(2.0)
-                    try server.start()
-                    server.startBroadcasting()
-                    webSocketServer = server
-                    AppState.shared.iinaSyncServerRunning = true
-                } catch {
-                    AppState.shared.errorMessage = "IINA sync server failed: \(error.localizedDescription)"
-                    // Translation continues without sync — non-fatal
-                }
-            }
 
             isRunning = true
             isTransitioning = false
@@ -305,6 +310,10 @@ class TranslationEngine {
     }
 
     // MARK: - Helpers
+
+    nonisolated private static func latencyJSON(_ latency: Double) -> String {
+        "{\"latency\":\(String(format: "%.2f", latency)),\"isTranslating\":true}"
+    }
 
     private func languageName(for code: String) -> String {
         supportedLanguages.first { $0.code == code }?.name ?? code

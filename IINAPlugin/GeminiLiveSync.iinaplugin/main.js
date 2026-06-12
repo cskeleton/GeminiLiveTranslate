@@ -9,6 +9,14 @@ var showOSD = true;
 var pollTimer = null;
 var failCount = 0;
 var initialized = false;
+var lastDelayChangeTime = 0;
+
+// Every audio-delay change forces an A/V resync in mpv (visible stutter), so
+// only follow the server value when it moved meaningfully, and not too often.
+var DELAY_CHANGE_THRESHOLD = 0.4; // seconds
+var DELAY_CHANGE_MIN_INTERVAL_MS = 5000;
+// Polls are every 500ms; ~20 consecutive failures ≈ 10s of lost connection.
+var MAX_POLL_FAILURES = 20;
 
 // --- Plugin Initialization ---
 function init() {
@@ -130,7 +138,7 @@ function pollOnce() {
     if (failCount === 1) {
       iina.console.log("[GeminiSync] HTTP request failed: " + err);
     }
-    if (failCount > 6 && currentDelay > 0) {
+    if (failCount > MAX_POLL_FAILURES && currentDelay > 0) {
       setDelay(0);
       if (showOSD) {
         iina.core.osd("GeminiLiveSync: connection lost");
@@ -154,6 +162,15 @@ function handleLatencyUpdate(data) {
   }
 
   if (typeof data.latency === "number" && data.latency > 0) {
+    var diff = Math.abs(data.latency - currentDelay);
+    if (diff < DELAY_CHANGE_THRESHOLD) return;
+
+    var now = Date.now();
+    var firstApplication = currentDelay === 0;
+    if (!firstApplication && now - lastDelayChangeTime < DELAY_CHANGE_MIN_INTERVAL_MS) {
+      return;
+    }
+    lastDelayChangeTime = now;
     setDelay(data.latency);
   }
 }

@@ -14,6 +14,9 @@ final class GeminiWebSocket: NSObject, URLSessionWebSocketDelegate, URLSessionDe
     var onInputTranscription: ((String, String) -> Void)?
     var onOutputTranscription: ((String, String) -> Void)?
     var onAudioData: ((Data) -> Void)?
+    /// Fired when the server marks a turn/generation as complete — the next
+    /// audio chunk belongs to a new response.
+    var onTurnComplete: (() -> Void)?
     var onError: ((Error) -> Void)?
 
     init(apiKey: String, targetLanguageCode: String) {
@@ -272,6 +275,13 @@ final class GeminiWebSocket: NSObject, URLSessionWebSocketDelegate, URLSessionDe
                         self?.onAudioData?(audioData)
                     }
                 }
+            }
+        }
+
+        if (serverContent["turnComplete"] as? Bool) == true
+            || (serverContent["generationComplete"] as? Bool) == true {
+            callbackQueue.async { [weak self] in
+                self?.onTurnComplete?()
             }
         }
     }
