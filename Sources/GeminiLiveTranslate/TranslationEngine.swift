@@ -259,27 +259,29 @@ class TranslationEngine {
     // MARK: - File Output
 
     private func setupSubtitleFile() {
+        let (isValid, errorMessage) = AppState.shared.validateSubtitlePath()
+
+        if !isValid {
+            AppState.shared.errorMessage = errorMessage ?? "Cannot access subtitle path"
+            return
+        }
+
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd_HHmmss"
         let timestamp = formatter.string(from: Date())
         let fileName = "subtitles_\(timestamp).txt"
 
-        guard let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else {
-            return
-        }
-
-        subtitleFileURL = downloadsURL.appendingPathComponent(fileName)
-
-        guard let url = subtitleFileURL else { return }
+        let filePath = AppState.shared.subtitleFilePath.appendingPathComponent(fileName)
+        subtitleFileURL = filePath
 
         let header = "Gemini Live Translate - Subtitles\n"
             + "Started: \(Date())\n"
             + "Target Language: \(targetLanguageCode)\n"
             + String(repeating: "─", count: 50) + "\n\n"
 
-        try? header.write(to: url, atomically: true, encoding: .utf8)
+        try? header.write(to: filePath, atomically: true, encoding: .utf8)
 
-        subtitleFileHandle = try? FileHandle(forWritingTo: url)
+        subtitleFileHandle = try? FileHandle(forWritingTo: filePath)
         subtitleFileHandle?.seekToEndOfFile()
     }
 

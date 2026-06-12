@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Main settings view for the Live Translate app
 struct SettingsView: View {
@@ -80,8 +81,33 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Toggle("Show subtitle overlay on screen", isOn: $appState.showOverlay)
                         .fixedSize(horizontal: false, vertical: true)
-                    Toggle("Write subtitles to file (~/Downloads)", isOn: $appState.writeToFile)
+                    Toggle("Write subtitles to file", isOn: $appState.writeToFile)
                         .fixedSize(horizontal: false, vertical: true)
+
+                    if appState.writeToFile {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(alignment: .center, spacing: 8) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Save location")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text(appState.subtitleFilePath.path)
+                                        .font(.caption)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                        .foregroundStyle(.blue)
+                                }
+                                Spacer()
+                                Button(action: browseForPath) {
+                                    Text("Browse…")
+                                        .font(.caption)
+                                }
+                            }
+                            .padding(6)
+                            .background(Color.black.opacity(0.05))
+                            .cornerRadius(4)
+                        }
+                    }
                 }
 
                 Divider()
@@ -309,6 +335,25 @@ struct SettingsView: View {
                     appState.statusMessage = "Error"
                 }
                 isToggling = false
+            }
+        }
+    }
+
+    private func browseForPath() {
+        let openPanel = NSOpenPanel()
+        openPanel.canChooseDirectories = true
+        openPanel.canChooseFiles = false
+        openPanel.allowsMultipleSelection = false
+        openPanel.directoryURL = appState.subtitleFilePath
+
+        openPanel.begin { response in
+            if response == .OK, let url = openPanel.url {
+                appState.subtitleFilePathString = url.path
+
+                let (isValid, errorMessage) = appState.validateSubtitlePath()
+                if !isValid {
+                    appState.errorMessage = errorMessage
+                }
             }
         }
     }

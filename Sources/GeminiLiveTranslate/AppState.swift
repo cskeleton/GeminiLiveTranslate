@@ -55,6 +55,12 @@ class AppState: ObservableObject {
     @AppStorage("writeToFile") var writeToFile: Bool = true
     @AppStorage("subtitleFontSize") var subtitleFontSize: Double = 22.0
     @AppStorage("originalAudioVolume") var originalAudioVolume: Double = 0.15
+    @AppStorage("subtitleFilePathString") var subtitleFilePathString: String = {
+        if let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first {
+            return downloadsURL.path
+        }
+        return NSHomeDirectory() + "/Downloads"
+    }()
 
     // MARK: - IINA Sync Settings
     @AppStorage("enableIINASync") var enableIINASync: Bool = false
@@ -73,13 +79,45 @@ class AppState: ObservableObject {
     @Published var iinaSyncServerRunning: Bool = false
 
     // MARK: - Subtitle File
+    var subtitleFilePath: URL {
+        URL(fileURLWithPath: subtitleFilePathString)
+    }
+
     var subtitleFileURL: URL? {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd_HHmmss"
         let timestamp = formatter.string(from: Date())
         let fileName = "subtitles_\(timestamp).txt"
-        return FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent(fileName)
+        return subtitleFilePath.appendingPathComponent(fileName)
+    }
+
+    func validateSubtitlePath() -> (isValid: Bool, errorMessage: String?) {
+        let fm = FileManager.default
+        let path = subtitleFilePath.path
+
+        // Check if path exists
+        var isDir: ObjCBool = false
+        if !fm.fileExists(atPath: path, isDirectory: &isDir) {
+            // Try to create the directory
+            do {
+                try fm.createDirectory(at: subtitleFilePath, withIntermediateDirectories: true, attributes: nil)
+                return (true, nil)
+            } catch {
+                return (false, "Cannot create directory: \(error.localizedDescription)")
+            }
+        }
+
+        // Check if it's a directory
+        if !isDir.boolValue {
+            return (false, "Path is not a directory")
+        }
+
+        // Check write permissions
+        if !fm.isWritableFile(atPath: path) {
+            return (false, "No write permission for this directory")
+        }
+
+        return (true, nil)
     }
 
     func resetSubtitles() {
