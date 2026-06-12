@@ -6,7 +6,7 @@ A simple and lightweight real-time live translation overlay for video players, p
 
 ## Features
 
-- **Live Audio Translation**: Translates system audio in real-time using Gemini Live Translate API
+- **Live Audio Translation**: Translates system audio and video in real-time using Gemini Live Translate API, including web and local sources.
 - **IINA Plugin Integration**: Automatic audio delay synchronization with IINA player
 - **Smart Latency Tracking**: Per-utterance latency measurement with adaptive EMA smoothing
 - **Adaptive FIFO Buffering**: Never drops audio bursts; smooth playback during pauses
