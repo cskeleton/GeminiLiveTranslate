@@ -1,6 +1,8 @@
 # GeminiLiveTranslate
 
-Real-time live translation overlay for video players using Google's Gemini API.
+A simple and lightweight real-time live translation overlay for video players, powered by Google's Gemini 3.5 Live Translate API.
+
+**中文文档**: [README.zh.md](README.zh.md)
 
 ## Features
 
@@ -14,7 +16,7 @@ Real-time live translation overlay for video players using Google's Gemini API.
 
 - macOS 14 or later
 - Internet connection
-- Google Gemini API key
+- [Google Gemini API key](https://aistudio.google.com/apikey) (free tier available for Gemini 3.5 Live Translate)
 - (Optional) IINA player for subtitle overlay and delay sync
 
 ## Installation
@@ -55,10 +57,18 @@ Real-time live translation overlay for video players using Google's Gemini API.
 ## Configuration
 
 1. Launch the application
-2. Enter your Gemini API key in Settings
+2. Enter your Gemini API key in Settings (get one free at [Google AI Studio](https://aistudio.google.com/apikey))
 3. Select target language for translation
 4. (Optional) Enable IINA sync if using the player
 5. Click "Start Translation"
+
+## Screenshots
+
+### Application Interface
+![App Interface](screenshots/app.png)
+
+### Subtitle Overlay
+![Subtitle Overlay](screenshots/subtitles.png)
 
 ## Architecture
 
